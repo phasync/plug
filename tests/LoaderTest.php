@@ -103,14 +103,34 @@ test("cache mode: a sibling path built from Reflection's mirror-path getFileName
     expect($result['code'])->toBe(0, $result['err']);
     $data = json_decode($result['out'], true);
     expect($data['interface'])->toBeTrue(); // both require_once calls landed on the one file: no redeclare
-    expect($data['reflectedFile'])->toStartWith($cacheDir); // the documented trade-off: Reflection shows the mirror
-    expect($data['reflectedFile'])->not->toContain($cacheDir . $cacheDir); // but never a mirror of the mirror
+    // ReflectionClass is itself mapped (see install()): getFileName() now reports the original
+    // path, same as __FILE__/__DIR__, not the cache mirror -- so this never had a mirror path to
+    // build a sibling path from in the first place. Still worth keeping as a regression case for
+    // the mirror-of-mirror bug itself, in case that mapping is ever removed.
+    expect($data['reflectedFile'])->toBe(realpath("$targets/reflect_sibling.php"));
 
     // Exactly one mirror of the sibling exists on disk -- not a second, nested one.
     $mirrors = glob($cacheDir . realpath("$targets/reflect_sibling_target.php"));
     expect($mirrors)->toHaveCount(1);
     $nested = glob($cacheDir . $cacheDir . '*', GLOB_NOSORT);
     expect($nested)->toBe([]);
+});
+
+test('cache mode: ReflectionClass, ReflectionObject, ReflectionEnum, ReflectionFunction and ReflectionMethod all report the original path, a Symfony-Kernel::getProjectDir()-style dirname() of one resolves the real project root, and get_included_files() lists originals too', function () use ($targets) {
+    $cacheDir = plug_temp_dir();
+
+    $result = run_harness($cacheDir, [], "$targets/reflection_types.php", mode: 'cache');
+
+    expect($result['code'])->toBe(0, $result['err']);
+    $data = json_decode($result['out'], true);
+    foreach (['class', 'object', 'enum', 'function', 'method'] as $kind) {
+        expect($data[$kind])->toBe($data['original'], "Reflection$kind reported the mirror, not the original");
+    }
+    expect($data['projectDir'])->toBe(\dirname($data['original']));
+    expect($data['includedFiles'])->toContain($data['original']);
+    foreach ($data['includedFiles'] as $file) {
+        expect($file)->not->toStartWith($cacheDir);
+    }
 });
 
 test("non-include file operations behave natively (no wrapper is involved in 'cache' mode either)", function () use ($targets) {

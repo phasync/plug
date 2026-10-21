@@ -115,6 +115,37 @@ final class Loader
             throw new \InvalidArgumentException(self::class . "::install(): mode must be 'wrapper' or 'cache', got '$mode'");
         }
         self::$mode = $mode;
+        if ('cache' === $mode) {
+            // Cache mode's own trade-off (see this class's docblock): Reflection, not rewritten
+            // by fileConstants the way __FILE__/__DIR__ are, reports the cache *mirror* path --
+            // a tree of translated .php files only, missing every non-PHP resource (config/,
+            // templates/, ...) a framework's own Reflection-based self-location (Symfony's
+            // Kernel::getProjectDir(), say) would otherwise find right next to it. These five
+            // Reflection subclasses and four function replacements (see Reflection/*.php and
+            // functions.php) map every one of those back to the original path babel's own
+            // fileConstants rewrite already uses -- built in here, not left to every caller to
+            // remember, since it is intrinsic to what 'cache' mode must guarantee.
+            require_once __DIR__ . '/Reflection/UnmirrorsFileName.php';
+            require_once __DIR__ . '/Reflection/ReflectionClass.php';
+            require_once __DIR__ . '/Reflection/ReflectionObject.php';
+            require_once __DIR__ . '/Reflection/ReflectionEnum.php';
+            require_once __DIR__ . '/Reflection/ReflectionFunction.php';
+            require_once __DIR__ . '/Reflection/ReflectionMethod.php';
+            require_once __DIR__ . '/functions.php';
+            $map['classes'] = ($map['classes'] ?? []) + [
+                \ReflectionClass::class => Reflection\ReflectionClass::class,
+                \ReflectionObject::class => Reflection\ReflectionObject::class,
+                \ReflectionEnum::class => Reflection\ReflectionEnum::class,
+                \ReflectionFunction::class => Reflection\ReflectionFunction::class,
+                \ReflectionMethod::class => Reflection\ReflectionMethod::class,
+            ];
+            $map['functions'] = ($map['functions'] ?? []) + [
+                'get_included_files' => __NAMESPACE__ . '\\get_included_files',
+                'get_required_files' => __NAMESPACE__ . '\\get_required_files',
+                'debug_backtrace' => __NAMESPACE__ . '\\debug_backtrace',
+                'debug_print_backtrace' => __NAMESPACE__ . '\\debug_print_backtrace',
+            ];
+        }
         self::$babel = 'cache' === $mode
             ? new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], includeHandler: 'phasync\\plug\\path', fileConstants: true)
             : new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? []);
@@ -288,8 +319,11 @@ final class Loader
      *
      * A loop, not a single strip: idempotent against more than one level of nesting however it
      * might arise, so the Loader never mirrors a mirror, full stop, not just this one level.
+     *
+     * Public: also what the Reflection subclasses and function replacements in cache mode's own
+     * map (see install()) call to turn a mirror path back into the original one.
      */
-    private static function unmirror(string $real): string
+    public static function unmirror(string $real): string
     {
         $prefix = self::$cacheDir . '/';
         while (\str_starts_with($real, $prefix)) {
@@ -297,6 +331,12 @@ final class Loader
         }
 
         return $real;
+    }
+
+    /** The cache directory in use, for code (debug_print_backtrace()'s replacement) that strips its text out of a whole blob rather than one path at a time. */
+    public static function cacheDir(): string
+    {
+        return self::$cacheDir;
     }
 
     /**
