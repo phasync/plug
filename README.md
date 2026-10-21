@@ -8,9 +8,9 @@ on a real (if small) application. Not published; local proof only.
 ## `phasync\plug\Loader`
 
 The one entry point is `Loader::install(array $map, string $cacheDir, array $excludePrefixes,
-string $mode = 'wrapper')`, in one of two modes:
+string $mode = 'cache')`, in one of two modes:
 
-**`'wrapper'`** (the default). `Loader` is itself a `file://` stream wrapper: every file PHP opens
+**`'wrapper'`**. `Loader` is itself a `file://` stream wrapper: every file PHP opens
 for include is translated through phasync-babel and served under its *original* path (`__FILE__`,
 `__DIR__`, `include_once` dedup, error messages and stack traces all read as without the wrapper
 -- the same mechanism phasync-babel's own test harness, `tests/IncludeWrapper.php`, uses). Every
@@ -19,7 +19,7 @@ other file operation (`file_get_contents`, `fopen`, `is_file`, `mkdir`, `unlink`
 original mode this proof was built around -- but see "The opcache finding" below for the real cost
 it carries.
 
-**`'cache'`**. No stream wrapper at all. Translated files are written to the cache directory
+**`'cache'`** (the default). No stream wrapper at all. Translated files are written to the cache directory
 *mirroring the original absolute path* (`<cache>/<original path>`): real files, which opcache
 caches exactly as it would any other file. `phasync\plug\path($path, $fromDir)` resolves `$path`
 the way PHP's own `include` would (absolute; `./`/`../` relative to the working directory;
@@ -84,24 +84,18 @@ classes), the recompile cost is paid once per worker start, not per request (con
 `/cpu` latency with the loader on is indistinguishable from off, once the worker has booted). Under
 a per-request bootstrap such as PHP-FPM, those same files would recompile on every hit instead.
 
-**But a file `include`d fresh on every request (a compiled view, in `'wrapper'` mode) pays this
-cost every request under Swerve too -- and it turned out to be too small to measure.** The `/tpl`
-route (see below) `include`s 20 ~245-line template files -- HTML mixed with loops, no `_once`,
-so every one recompiles from source on every request in `'wrapper'` mode, never on `'cache'`'s or
-`'ext'`'s already-opcache-cached path. Measured end to end (below): no measurable difference. A
-direct, isolated measurement of the recompile cost itself (`php -d opcache.enable_cli=1`,
-including the same file 2000 times through a plain pass-through wrapper, no translation) explains
-why: PHP's own lexer/parser/compiler is fast enough that even a 20,000-line purely procedural file
-(no classes) recompiles in ~0.06 ms -- indistinguishable from reading it already-compiled from
-opcache's shared memory (~0.07 ms for the same file). *Where* OPcache earns its keep is declaring
-many classes (symbol tables, interned strings) and avoiding filesystem round trips across the
-hundreds of files a framework bootstrap touches -- not the bare cost of parsing procedural PHP,
-which this project's `/tpl` route is (deliberately, matching a compiled view) and which is
-genuinely cheap to redo. **Revised conclusion: the per-request recompile cost from `'wrapper'`
-mode is real and architectural, but for template-shaped includes specifically, it is not where a
-real application's overhead would come from; `'cache'` mode exists for the cases where it would
-(heavier, class-declaring files touched fresh per request), and costs nothing extra for the ones
-where it wouldn't.**
+**A file `include`d fresh on every request (compiled views, config and route files, a classic
+front controller and its templates) pays the recompile cost on every request in `'wrapper'`
+mode, and that cost is not small.** Measured without opcache, compiling only (no execution): a
+31 KB template with PHP in every row compiles in 0.59 ms (about 19 µs per KB); a 120 KB file of
+400 classes compiles and declares in 6 ms. A request that includes 100 KB of compiled views pays
+milliseconds of recompilation per request through the wrapper. The `/tpl` comparison below does
+not show it because its templates compile cheaply and its ~15 ms per request is dominated by
+rendering a 191 KB page; the differences between modes are within that run's noise. (An earlier
+version of this section claimed a 20,000-line file recompiles in ~0.06 ms; that probe measured a
+cached path, not compilation, and the claim is withdrawn.) **Conclusion: `'cache'` mode is the
+default, because opcache must cache translated files like any other. `'wrapper'` mode remains for
+debugging, where original paths in traces matter more than speed.**
 
 (Two artifacts worth noting from building the probes: `opcache.file_update_protection`, 2 seconds
 by default, skips caching any file younger than that -- a file created and included in the same
@@ -164,13 +158,11 @@ worker is warm) and, for comparison, `/cpu` (0 `include`s/request, the original 
 | B-cache | 17.39 ms | -- |
 | C: ext-phasync | 15.49 ms | -- |
 
-All four `/tpl` numbers sit within about 3 ms of each other (B-cache a little above the rest,
-plausibly its own extra `stat()` + `.key`-file read per cache lookup, even on a hit) -- no mode
-stands out as paying a real per-request recompilation tax, including B-wrapper, whose 20 `include`s
-are genuinely never opcache-cached. See "The opcache finding" above for why: at this template size
-(and far beyond it, per the isolated probe), PHP's own compile time is simply too small a fraction
-of the ~15 ms floor (dominated by swerve's HTTP handling, `curl`'s own process overhead, and the
-actual loop work the templates render) to show up. `/cpu`'s ~0.2 ms A-vs-B gap (unchanged from the
+All four `/tpl` numbers sit within about 3 ms of each other, which is this run's noise; the
+route's templates compile too cheaply, relative to the 191 KB page they render, to show the
+recompile cost (see "The opcache finding" for the measured compile costs). B-cache's slightly
+higher number is plausibly the per-include `stat()` and `.key` read `path()` does even on a cache
+hit; an in-process memo of resolved paths would remove it. `/cpu`'s ~0.2 ms A-vs-B gap (unchanged from the
 original three-mode run) remains the loader's one confirmed per-request cost, and it has nothing
 to do with `include`: the loader does zero include-related work on `/cpu`'s request path, in
 either mode.

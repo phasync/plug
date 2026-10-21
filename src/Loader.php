@@ -106,7 +106,7 @@ final class Loader
      * @param list<string>                                                            $excludePrefixes path prefixes never translated (phasync, swerve, phasync-babel, phasync-hooked, phasync-plug); symlinks are resolved
      * @param 'wrapper'|'cache'                                                       $mode      'wrapper': a file:// stream wrapper, original paths preserved by PHP believing it opened them; 'cache': no wrapper, a cache directory mirroring the original tree, opcache-cacheable, original paths preserved by phasync-babel's fileConstants/includeHandler options instead
      */
-    public static function install(array $map, string $cacheDir, array $excludePrefixes, string $mode = 'wrapper'): void
+    public static function install(array $map, string $cacheDir, array $excludePrefixes, string $mode = 'cache'): void
     {
         if (self::$installed) {
             throw new \LogicException(self::class . '::install() runs once per process');
