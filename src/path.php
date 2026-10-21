@@ -18,7 +18,15 @@ namespace phasync\plug;
  *
  * @throws \RuntimeException when nothing exists at $path (from $fromDir)
  */
-function path(string $path, string $fromDir): string
-{
-    return Loader::resolve($path, $fromDir);
+if (!\function_exists(__NAMESPACE__ . '\\path')) {
+    // Guarded: 'cache' mode's own bootstrap (see e2e/app/swerve.php) must make this function
+    // available *before* Composer's own autoloader has run (it is what the application's first,
+    // translated require of vendor/autoload.php itself calls) -- by requiring this file
+    // natively, directly, ahead of time. Composer's "files" autoload entries are always required
+    // unconditionally (unlike a class, which an autoloader skips once already declared), so
+    // without this guard that normal, once-only load would redeclare the function fatally.
+    function path(string $path, string $fromDir): string
+    {
+        return Loader::resolve($path, $fromDir);
+    }
 }

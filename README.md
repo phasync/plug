@@ -7,31 +7,50 @@ on a real (if small) application. Not published; local proof only.
 
 ## `phasync\plug\Loader`
 
-A `file://` stream wrapper, registered by the one entry point `Loader::install(array $map, string
-$cacheDir, array $excludePrefixes)`. Every file PHP opens for include is translated through
-phasync-babel and served under its *original* path (`__FILE__`, `__DIR__`, `include_once`
-dedup, error messages and stack traces all read as without the wrapper -- the same mechanism
-phasync-babel's own test harness, `tests/IncludeWrapper.php`, uses). Every other file operation
-(`file_get_contents`, `fopen`, `is_file`, `mkdir`, `unlink`, `touch`, `rename`, `opendir`, `stat`,
-...) passes straight through to the native wrapper.
+The one entry point is `Loader::install(array $map, string $cacheDir, array $excludePrefixes,
+string $mode = 'wrapper')`, in one of two modes:
 
-Translations are cached on disk at `$cacheDir`, keyed by the file's real path, mtime, size, and a
-hash of the map plus phasync-babel's own installed reference -- a file is translated once, read
-back from the cache by every later worker or process that shares the directory.
+**`'wrapper'`** (the default). `Loader` is itself a `file://` stream wrapper: every file PHP opens
+for include is translated through phasync-babel and served under its *original* path (`__FILE__`,
+`__DIR__`, `include_once` dedup, error messages and stack traces all read as without the wrapper
+-- the same mechanism phasync-babel's own test harness, `tests/IncludeWrapper.php`, uses). Every
+other file operation (`file_get_contents`, `fopen`, `is_file`, `mkdir`, `unlink`, `touch`,
+`rename`, `opendir`, `stat`, ...) passes straight through to the native wrapper. Simple, and the
+original mode this proof was built around -- but see "The opcache finding" below for the real cost
+it carries.
 
-`$excludePrefixes` are symlink-resolved and never translated: in this proof, phasync, swerve,
-phasync-babel, phasync-hooked and phasync-plug's own `src/` (see "What didn't work" below for why
-this list is not optional).
+**`'cache'`**. No stream wrapper at all. Translated files are written to the cache directory
+*mirroring the original absolute path* (`<cache>/<original path>`): real files, which opcache
+caches exactly as it would any other file. `phasync\plug\path($path, $fromDir)` resolves `$path`
+the way PHP's own `include` would (absolute; `./`/`../` relative to the working directory;
+otherwise `include_path` entries, then `$fromDir`, then the working directory), translates it if
+needed and returns the path to actually open. This is also the one function phasync-babel's new
+`includeHandler` option is configured with in this mode (its new `fileConstants` option keeps
+`__FILE__`/`__DIR__` reporting the original path), so a translated file's own `include`/`require`
+statements are rewritten to call it too -- recursively, with no second entry point needed.
+Reflection's `getFileName()`, an exception's `getFile()`/trace, and PHP's own error messages,
+unlike `__FILE__`/`__DIR__`, do show the cache mirror path in this mode (still recognisable: it
+mirrors the original tree), since those necessarily come from the file PHP actually compiled.
+
+Both modes share the same on-disk cache semantics: translations are keyed by the file's real path,
+mtime, size, and a hash of the map plus phasync-babel's own installed reference, so a file is
+translated once, read back by every later worker or process that shares the directory.
+`$excludePrefixes` are symlink-resolved and never translated in either mode: in this proof,
+phasync, swerve, phasync-babel, phasync-hooked and phasync-plug's own `src/` (see "What didn't
+work" below for why this list is not optional).
 
 ### Tests
 
-`vendor/bin/pest` (6 tests, all passing). Since `Loader::install()` runs once per process (it
-registers a process-global stream wrapper), each scenario runs `tests/fixtures/harness.php` as
-its own subprocess. Covered: `__FILE__`/`__DIR__` preserved under translation;
+`vendor/bin/pest` (11 tests, all passing). Since `Loader::install()` runs once per process (in
+`'wrapper'` mode it registers a process-global stream wrapper), each scenario runs
+`tests/fixtures/harness.php` as its own subprocess, in either mode. Covered, in both modes:
+`__FILE__`/`__DIR__` preserved under translation and the hooked replacement actually called;
 `include_once`/`require_once` dedup across translated files; a path under an excluded prefix
 served byte-for-byte unchanged; the on-disk cache is reused by a second, independent process
-without rewriting the cache file; native file operations unaffected; `install()` refuses a second
-call in the same process.
+without rewriting it. `'cache'`-mode only: the mirror file is confirmed cached by opcache
+(`opcache_get_status(true)`, 2 hits of 3 includes). Mode-agnostic: native file operations
+unaffected (no wrapper exists in `'cache'` mode either, so this is trivially true there, checked
+once more anyway); `install()` refuses a second call in the same process.
 
 ## The opcache finding
 
@@ -54,22 +73,45 @@ path requires, opts every file touched by that wrapper out of OPcache for good. 
 dg/bypass-finals, which use the same kind of wrapper for a different purpose (monkey-patching,
 stripping `final`), hit the same wall and don't claim to solve it either; there is no userland
 trick that gets both the original path *and* opcode caching for a file opened this way -- the two
-requirements are architecturally exclusive.
+requirements are architecturally exclusive *for that mechanism*. `Loader`'s `'cache'` mode sidesteps
+the conflict by not using a stream wrapper at all (see above): a real file at a real (mirror) path,
+confirmed opcache-cacheable the normal way.
 
-**Why this doesn't block Swerve, but would block PHP-FPM.** Swerve's worker model requires
-application code once, at boot, and keeps it loaded for the worker's life -- so this cost is paid
-once per worker start, not per request (confirmed below: `/cpu` latency with the loader on is
-indistinguishable from off, once the worker has booted). Under a per-request bootstrap such as
-PHP-FPM, every request would recompile the entire translated call graph from source on every hit,
-losing exactly the acceleration opcache exists to provide -- a severe regression there. This is
-the deciding factor on production viability the task asked for: **viable for a Swerve-shaped,
-boot-once server; not viable for a per-request one.**
+**Why this doesn't block Swerve, but would block PHP-FPM -- for files required once at boot.**
+Swerve's worker model requires application code once, at boot, and keeps it loaded for the
+worker's life -- so for files only ever required that way (an application's own entry point, its
+classes), the recompile cost is paid once per worker start, not per request (confirmed below:
+`/cpu` latency with the loader on is indistinguishable from off, once the worker has booted). Under
+a per-request bootstrap such as PHP-FPM, those same files would recompile on every hit instead.
 
-(An artifact worth noting from building the probe itself: `opcache.file_update_protection`, 2
-seconds by default, skips caching any file younger than that -- a file created and included in the
-same request is never cached either way, wrapper or not, confounding a naive version of this test.
-Swerve already sets it to `0` in its own ini defaults, so the finding above is not an artifact of
-that setting.)
+**But a file `include`d fresh on every request (a compiled view, in `'wrapper'` mode) pays this
+cost every request under Swerve too -- and it turned out to be too small to measure.** The `/tpl`
+route (see below) `include`s 20 ~245-line template files -- HTML mixed with loops, no `_once`,
+so every one recompiles from source on every request in `'wrapper'` mode, never on `'cache'`'s or
+`'ext'`'s already-opcache-cached path. Measured end to end (below): no measurable difference. A
+direct, isolated measurement of the recompile cost itself (`php -d opcache.enable_cli=1`,
+including the same file 2000 times through a plain pass-through wrapper, no translation) explains
+why: PHP's own lexer/parser/compiler is fast enough that even a 20,000-line purely procedural file
+(no classes) recompiles in ~0.06 ms -- indistinguishable from reading it already-compiled from
+opcache's shared memory (~0.07 ms for the same file). *Where* OPcache earns its keep is declaring
+many classes (symbol tables, interned strings) and avoiding filesystem round trips across the
+hundreds of files a framework bootstrap touches -- not the bare cost of parsing procedural PHP,
+which this project's `/tpl` route is (deliberately, matching a compiled view) and which is
+genuinely cheap to redo. **Revised conclusion: the per-request recompile cost from `'wrapper'`
+mode is real and architectural, but for template-shaped includes specifically, it is not where a
+real application's overhead would come from; `'cache'` mode exists for the cases where it would
+(heavier, class-declaring files touched fresh per request), and costs nothing extra for the ones
+where it wouldn't.**
+
+(Two artifacts worth noting from building the probes: `opcache.file_update_protection`, 2 seconds
+by default, skips caching any file younger than that -- a file created and included in the same
+request is never cached either way, wrapper or not, confounding a naive version of the first test
+until it was set to `0`; Swerve already sets it to `0` in its own ini defaults, so the opcache
+finding above is not an artifact of that setting. Separately, the recompile-cost probe's naive
+first version timed `include` of a 300-loop-per-row template and found opcache-cached *slower*
+than never-cached, by over 1 ms -- because `include`'s own time includes *running* the loops, not
+just compiling them, and that runtime cost is identical either way and dominated the measurement;
+isolating compile time needed files with many simple statements and no runtime work.)
 
 ## The test application (`e2e/app/`)
 
@@ -79,40 +121,59 @@ A plain `Swerve\RequestHandler`, no framework, with Predis installed via Compose
 - `/redis` -- Predis `BLPOP` on an empty key with a 1s timeout (a blocking server-side wait; a
   fresh connection per request -- see "What didn't work" below for why sharing one doesn't work);
 - `/proc` -- `exec('sleep 1; echo hi', $out)`, returns the output;
-- `/cpu` -- a short pure-PHP loop, the control (not I/O).
+- `/cpu` -- a short pure-PHP loop, a control (not I/O, nothing `include`d per request);
+- `/tpl` -- renders a page from 20 small template files (`e2e/app/templates/tpl-*.php`, ~245 lines
+  each: HTML mixed with `<?= ?>` and `foreach` loops, like a compiled view), each freshly
+  `include`d (not `_once`) on *every* request -- a second control, this one with 20 real
+  `include`s on the request path every time, every mode.
 
-`e2e/app/swerve.php` is a thin bootstrap: it installs the loader (when `PLUG_LOADER_ON=1`) with
-phasync-hooked's map, then `require`s `app.php` -- the actual application -- as a *separate* file
-(see "What didn't work": a file cannot translate its own source). `app.php` and everything it
-requires, Predis included, are then compiled through the wrapper when the loader is on.
+`e2e/app/swerve.php` is a thin bootstrap: it installs the loader (when `PLUG_LOADER_ON=1`, in the
+mode named by `PLUG_MODE`) with phasync-hooked's map, then requires `app.php` -- the actual
+application -- as a *separate* file (see "What didn't work": a file cannot translate its own
+source), through `phasync\plug\path()` in `'cache'` mode (no stream wrapper exists there) or
+plainly otherwise. `app.php` and everything it requires, Predis and the templates included, are
+then compiled through the loader when it is on, in whichever mode.
 
 ## Results
 
-Three modes, one Swerve worker each (`--workers=1`), identical app and routes. Redis ran on
-`127.0.0.1:16399`; A/B/C each on their own port (18600/18601/18602).
+Four modes, one Swerve worker each (`--workers=1`), identical app and routes. Redis ran on
+`127.0.0.1:16399`; each mode on its own port (18600-18603).
 
 | Mode | `/sleep` (10 concurrent) | `/redis` (10 concurrent) | `/proc` (10 concurrent) | responses identical |
 |---|---|---|---|---|
-| A: no ext, loader off | 10.04 s | 10.86 s | 10.08 s | yes |
-| B: no ext, loader on (the plug) | **1.03 s** | **1.06 s** | **1.04 s** | yes |
+| A: no ext, loader off | 10.03 s | 10.86 s | 10.08 s | yes |
+| B-wrapper: no ext, loader on, `'wrapper'` | **1.03 s** | **1.06 s** | **1.04 s** | yes |
+| B-cache: no ext, loader on, `'cache'` | **1.03 s** | **1.11 s** | **1.04 s** | yes |
 | C: ext-phasync loaded, loader off | **1.02 s** | 1.10 s | 1.03 s | yes |
 
 A is sequential (10 requests x ~1s, one after another: the worker blocks on each native call).
-B and C both collapse to ~1 request's worth of wall time: the ten waits run concurrently. B tracks
-C within measurement noise on every route. Every response body was identical across all three
-modes, for every route (`/sleep` → `slept`, `/proc` → `hi`, `/redis` → `redis-timeout`, `/cpu` →
-`599994`).
+Every other mode collapses to ~1 request's worth of wall time: the ten waits run concurrently,
+indistinguishably between B-wrapper, B-cache and C -- including `/redis`, which needs Predis's own
+files translated too (see "What didn't work": this did not work on the first attempt in `'cache'`
+mode). Every response body was identical across every mode, for every route (`/sleep` → `slept`,
+`/proc` → `hi`, `/redis` → `redis-timeout`, `/cpu` → `599994`, `/tpl` → the same 191205-byte page,
+same MD5, in all four modes).
 
-`/cpu`, 200 sequential requests, average latency once the worker is warm (the loader's own
-steady-state overhead, since there is no `include` left on the request path by then):
+**The per-request cost** -- `/tpl` (20 fresh `include`s/request, 200 sequential, averaged once the
+worker is warm) and, for comparison, `/cpu` (0 `include`s/request, the original control):
 
-| Mode | avg latency |
-|---|---|
-| A: loader off | 18.46 ms |
-| B: loader on | 18.63 ms |
+| Mode | `/tpl` avg latency | `/cpu` avg latency |
+|---|---|---|
+| A: loader off | 15.82 ms | 18.46 ms |
+| B-wrapper | 14.75 ms | 18.63 ms |
+| B-cache | 17.39 ms | -- |
+| C: ext-phasync | 15.49 ms | -- |
 
-A ~0.2 ms difference on a 18 ms baseline (~1%), consistent with no translation happening on the
-request path at all -- the loader's cost is paid once, at worker boot, not per request.
+All four `/tpl` numbers sit within about 3 ms of each other (B-cache a little above the rest,
+plausibly its own extra `stat()` + `.key`-file read per cache lookup, even on a hit) -- no mode
+stands out as paying a real per-request recompilation tax, including B-wrapper, whose 20 `include`s
+are genuinely never opcache-cached. See "The opcache finding" above for why: at this template size
+(and far beyond it, per the isolated probe), PHP's own compile time is simply too small a fraction
+of the ~15 ms floor (dominated by swerve's HTTP handling, `curl`'s own process overhead, and the
+actual loop work the templates render) to show up. `/cpu`'s ~0.2 ms A-vs-B gap (unchanged from the
+original three-mode run) remains the loader's one confirmed per-request cost, and it has nothing
+to do with `include`: the loader does zero include-related work on `/cpu`'s request path, in
+either mode.
 
 ## What didn't work, and why
 
@@ -139,6 +200,31 @@ request path at all -- the loader's cost is paid once, at worker boot, not per r
   every route "worked" but nothing was ever translated, and the loader had no effect. Fixed by
   excluding `phasync-plug/src` specifically, not the whole repository.
 
+- **`'cache'` mode's bootstrap must never load Composer's own autoloader natively, or everything
+  it later autoloads stays untranslated for good.** `'cache'` mode rewrites `include`/`require`
+  only in a file's own source, at translate time -- a file compiled before the loader existed
+  keeps calling the *native*, unrewritten `require` for the rest of the process, no matter when
+  the loader is installed afterward. `'wrapper'` mode has no such gap (it intercepts every
+  `require` at the stream level, dynamically, checked at the moment each one actually runs, not
+  baked in when the requiring code was compiled) -- which is exactly why this was only found once
+  `'cache'` mode existed to compare against: the very first version of `swerve.php`'s `'cache'`
+  bootstrap still did `require 'vendor/autoload.php';` natively (to make `Loader`/`Babel`
+  autoloadable at all), which loads Composer's `ClassLoader` natively too -- and *every* class it
+  autoloads afterward, Predis included, calls `ClassLoader::loadClass()`'s own `require $file`,
+  compiled once, natively, when `ClassLoader.php` first loaded. Confirmed: 10 concurrent `/redis`
+  took ~10s in `'cache'` mode, not ~1s, with none of Predis's files appearing in the cache mirror
+  at all. Fixed by having `swerve.php` require only phasync-plug's and phasync-babel's own files
+  directly, by their known paths, instead of Composer's autoloader -- the *first* `require` of
+  `vendor/autoload.php` now happens inside `app.php`, which *is* translated, so Composer's own
+  `require($file)` calls are rewritten too, and everything it then autoloads (Predis included)
+  is reached, recursively, exactly as `'wrapper'` mode reaches it by a different route. One more
+  wrinkle this surfaced: phasync-plug's `path()` is a Composer "files" entry (always required
+  unconditionally, unlike a class, which an autoloader skips once already declared), so
+  pre-requiring it naively caused `Cannot redeclare function phasync\plug\path()` once Composer's
+  own autoloader loaded it again, normally, later; fixed with a `function_exists()` guard around
+  its declaration, the same idiom packages with "files" entries meant to tolerate a second load
+  already use.
+
 - **One blocking connection cannot be shared by concurrent coroutines.** The first version of
   `app.php` built one `Predis\Client` at worker boot and reused it for every request. Under real
   concurrency (mode B/C, ten `/redis` requests at once) this threw
@@ -151,10 +237,22 @@ request path at all -- the loader's cost is paid once, at worker boot, not per r
 - **A stray `dirname()` depth silently produced a nonexistent exclude path**, which this project's
   `Loader::install()` now treats as a hard error (`realpath()` fails -> throws) rather than
   silently exempting nothing, which is what the first version did and which is how the previous
-  two findings above went unnoticed for a while.
+  two findings above went unnoticed for a while. The same mistake recurred once more, writing the
+  opcache Pest test for `'cache'` mode (`dirname(__DIR__, 2)` from `tests/`, one level too many) --
+  caught immediately this time, by the same hard error, in seconds rather than an investigation.
+
+- **A naive recompile-cost probe measured runtime, not compile time.** Timing `include` of a
+  template with 300 loop iterations per "row" found opcache-cached *slower* than never-cached --
+  because `include` always both compiles and *runs* a file, and the loops' own execution time (the
+  same either way) dominated the measurement. Isolating compile time needed files built from many
+  simple statements doing no work at all; a template-generator script bug (a bash variable escaped
+  where it should have substituted, left `$row` undefined) surfaced the same lesson again in the
+  actual `/tpl` templates -- caught by `php -l` and a PHP warning in the raw output, not a design
+  flaw in the loader.
 
 Everything else in the task went as the plan expected: Predis's own `fread`/`fwrite`/`fgets`/
-`stream_socket_client` calls are confirmed translated (its files appear in the on-disk translation
-cache, 24 files after a cold boot of mode B); `--ext` loaded phasync 2.0.4's bundled extension via
-`PHP_INI_SCAN_DIR` with no changes needed to swerve or phasync; redis-server and every Swerve
-instance were started with a PID file and stopped by PID, nothing left running.
+`stream_socket_client` calls are confirmed translated in both modes (21 of Predis's files appear in
+`'cache'` mode's mirror tree; 24 files in `'wrapper'` mode's flat cache after a cold boot); `--ext`
+loaded phasync 2.0.4's bundled extension via `PHP_INI_SCAN_DIR` with no changes needed to swerve or
+phasync; redis-server and every Swerve instance were started with a PID file and stopped by PID,
+nothing left running.

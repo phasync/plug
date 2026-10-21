@@ -5,8 +5,14 @@ declare(strict_types=1);
 /**
  * The actual application: required by swerve.php only after the loader (if this run uses it)
  * is installed, so every call below -- and everything required transitively, Predis included --
- * is compiled through phasync\plug\Loader when it is on.
+ * is compiled through phasync\plug\Loader when it is on. This require is the one that must run
+ * through translation in 'cache' mode (swerve.php deliberately never loads Composer's own
+ * autoloader itself there, precisely so that this is the *first* time it loads): otherwise every
+ * class it autoloads afterward -- Predis included -- keeps calling the native, untranslated
+ * require for the rest of the process. Harmless everywhere else: Composer's own loader already
+ * guards against loading itself twice.
  */
+require __DIR__ . '/vendor/autoload.php';
 
 // One call, right here, so that if the loader is on, Predis's own files
 // (fread/fwrite/fgets/stream_socket_client, ...) are translated the first time they are
