@@ -95,6 +95,24 @@ test('cache mode: the cache mirror file is cached by opcache', function () use (
     expect($result['out'])->toBe('cached 2'); // 1 compile, 2 served from opcache's shared memory
 });
 
+test("cache mode: a sibling path built from Reflection's mirror-path getFileName() (Symfony's compiled DI container does exactly this to find a sibling file) resolves to the same mirror as a direct require, not a nested mirror of it", function () use ($targets) {
+    $cacheDir = plug_temp_dir();
+
+    $result = run_harness($cacheDir, [], "$targets/reflect_sibling.php", mode: 'cache');
+
+    expect($result['code'])->toBe(0, $result['err']);
+    $data = json_decode($result['out'], true);
+    expect($data['interface'])->toBeTrue(); // both require_once calls landed on the one file: no redeclare
+    expect($data['reflectedFile'])->toStartWith($cacheDir); // the documented trade-off: Reflection shows the mirror
+    expect($data['reflectedFile'])->not->toContain($cacheDir . $cacheDir); // but never a mirror of the mirror
+
+    // Exactly one mirror of the sibling exists on disk -- not a second, nested one.
+    $mirrors = glob($cacheDir . realpath("$targets/reflect_sibling_target.php"));
+    expect($mirrors)->toHaveCount(1);
+    $nested = glob($cacheDir . $cacheDir . '*', GLOB_NOSORT);
+    expect($nested)->toBe([]);
+});
+
 test("non-include file operations behave natively (no wrapper is involved in 'cache' mode either)", function () use ($targets) {
     $cacheDir = plug_temp_dir();
 

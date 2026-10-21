@@ -241,6 +241,7 @@ final class Loader
      */
     private static function cacheMirrorFor(string $real): string
     {
+        $real = self::unmirror($real);
         $mirror = self::$cacheDir . $real;
         if (self::excluded($real)) {
             return $real; // untranslated: no mirror, open the original directly
@@ -267,6 +268,35 @@ final class Loader
         \rename($tmp, $keyFile); // written after $mirror: a reader never sees a key that doesn't match what's already there
 
         return $mirror;
+    }
+
+    /**
+     * $real (or $fromDir), with any leading cache-mirror prefix stripped back to the original
+     * absolute path it mirrors -- a no-op unless $real is already inside the mirror tree.
+     *
+     * 'cache' mode never hides the mirror path from Reflection's getFileName(), an exception's
+     * getFile()/trace, or PHP's own error messages (see install()'s docblock: only __FILE__ and
+     * __DIR__, via fileConstants, report the original). Code that locates itself through one of
+     * those -- Symfony's compiled DI container does, to find a sibling file -- and builds a path
+     * from it (`dirname($reflectedFile) . '/Sibling.php'`) therefore builds a path that is
+     * *already* `<cacheDir><original sibling path>`: dirname() of the mirror plus the sibling's
+     * own name reconstructs the mirror's own path to it. Resolving that again, unchanged, would
+     * mirror the mirror (`<cacheDir><cacheDir><original sibling path>`) -- a second, distinct
+     * file defining the same classes/interfaces as the first, so the second require fatals with
+     * "Cannot redeclare". Stripping the prefix first makes it resolve to the exact same mirror
+     * the original path already produced, loaded (at most) once.
+     *
+     * A loop, not a single strip: idempotent against more than one level of nesting however it
+     * might arise, so the Loader never mirrors a mirror, full stop, not just this one level.
+     */
+    private static function unmirror(string $real): string
+    {
+        $prefix = self::$cacheDir . '/';
+        while (\str_starts_with($real, $prefix)) {
+            $real = \substr($real, \strlen(self::$cacheDir));
+        }
+
+        return $real;
     }
 
     /**
@@ -314,7 +344,7 @@ final class Loader
         if ('cache' !== self::$mode) {
             throw new \LogicException(self::class . "::resolve(): install() was not called with mode: 'cache'");
         }
-        $real = self::resolveIncludePath($path, $fromDir);
+        $real = self::resolveIncludePath(self::unmirror($path), self::unmirror($fromDir));
         if (false === $real) {
             throw new \RuntimeException(self::class . "::resolve(): nothing at '$path' (from '$fromDir')");
         }
