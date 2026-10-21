@@ -1,0 +1,6 @@
+/vendor/
+/composer.lock
+/e2e/app/vendor/
+/e2e/app/composer.lock
+/.phpunit.cache/
+*.cache

@@ -1,0 +1,40 @@
+{
+    "name": "phasync/plug",
+    "description": "End-to-end proof: a file:// stream wrapper that runs phasync-babel translated application code against phasync-hooked, so Swerve without ext-phasync still waits cooperatively",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.2",
+        "phasync/babel": "*",
+        "phasync/hooked": "*"
+    },
+    "require-dev": {
+        "pestphp/pest": "^3.0",
+        "phasync/phasync": "^2.0.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "phasync\\plug\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "phasync\\plug\\Tests\\": "tests/"
+        }
+    },
+    "repositories": [
+        {"type": "path", "url": "/home/frode/dev/phasync-babel", "options": {"symlink": true}},
+        {"type": "path", "url": "/home/frode/dev/phasync-hooked", "options": {"symlink": true}},
+        {"type": "path", "url": "/home/frode/dev/phasync", "options": {"symlink": true}}
+    ],
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "scripts": {
+        "test": "pest"
+    }
+}
