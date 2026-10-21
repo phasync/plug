@@ -15,7 +15,10 @@
     "autoload": {
         "psr-4": {
             "phasync\\plug\\": "src/"
-        }
+        },
+        "files": [
+            "src/path.php"
+        ]
     },
     "autoload-dev": {
         "psr-4": {

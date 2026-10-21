@@ -4,16 +4,18 @@ declare(strict_types=1);
 
 /**
  * Generic test harness: installs phasync\plug\Loader with a small, fixed map (see hooks.php)
- * and then requires the target file. One process per run, since Loader::install() runs once
- * per process; tests/LoaderTest.php runs this as a subprocess.
+ * and then requires the target file -- directly in 'wrapper' mode, through phasync\plug\path()
+ * in 'cache' mode, exactly as e2e/app/swerve.php does. One process per run, since
+ * Loader::install() runs once per process; tests/LoaderTest.php runs this as a subprocess.
  *
- * Usage: php harness.php <cacheDir> <excludePrefixesCSV, may be empty> <targetFile>
+ * Usage: php harness.php <cacheDir> <excludePrefixesCSV, may be empty> <targetFile> [mode]
  */
 
 require \dirname(__DIR__, 2) . '/vendor/autoload.php';
 require __DIR__ . '/hooks.php'; // native require: the wrapper is not installed yet
 
 [, $cacheDir, $excludeCsv, $target] = $argv;
+$mode = $argv[4] ?? 'wrapper';
 
 $map = [
     'functions' => [
@@ -31,6 +33,6 @@ if ('' !== $excludeCsv) {
     \array_push($exclude, ...\explode(',', $excludeCsv));
 }
 
-\phasync\plug\Loader::install($map, $cacheDir, $exclude);
+\phasync\plug\Loader::install($map, $cacheDir, $exclude, mode: $mode);
 
-require $target;
+require 'cache' === $mode ? \phasync\plug\path($target, \dirname($target)) : $target;

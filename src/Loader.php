@@ -8,35 +8,46 @@ use phasync\Babel\Babel;
 use phasync\Babel\Runtime;
 
 /**
- * A `file://` stream wrapper that translates PHP source through phasync/babel as PHP opens it
- * for include, so that calls to blocking global functions become calls to their phasync/hooked
- * replacements -- without the phasync C extension. Every other file operation
- * (file_get_contents, fopen, is_file, mkdir, unlink, touch, rename, opendir, stat, ...) passes
- * through to the native file wrapper, unchanged.
+ * Two ways to run application code translated through phasync/babel, so that calls to blocking
+ * global functions become calls to their phasync/hooked replacements -- without the phasync C
+ * extension. Both are reached only through {@see install()}.
  *
- * Translated code keeps running under its original path: PHP is told the *original* path was
- * opened (the translated bytes are served through an in-memory stream), so __FILE__, __DIR__,
- * include_once deduplication, error messages and stack traces all read as they did without this
- * wrapper. This is the same mechanism phasync/babel's own test harness
+ * **'wrapper' mode** (the default): this class is itself a `file://` stream wrapper, translating
+ * PHP source as PHP opens it for include. Every other file operation (file_get_contents, fopen,
+ * is_file, mkdir, unlink, touch, rename, opendir, stat, ...) passes through to the native file
+ * wrapper, unchanged. Translated code keeps running under its original path: PHP is told the
+ * *original* path was opened (the translated bytes are served through an in-memory stream), so
+ * __FILE__, __DIR__, include_once deduplication, error messages and stack traces all read as they
+ * did without this wrapper. This is the same mechanism phasync/babel's own test harness
  * (phasync-babel/tests/IncludeWrapper.php) uses, extended with a disk cache and an exclusion
- * list.
+ * list. The cost, per the project README's opcache finding: PHP's opcache does not cache scripts
+ * opened through a non-default 'file' stream wrapper, so every include/require of a translated
+ * file is recompiled from source every time it runs -- paid once per worker boot under Swerve
+ * (application files are required once, not per request), but a severe regression under a
+ * per-request bootstrap such as PHP-FPM.
  *
- * A path under one of the excluded prefixes (phasync, swerve, phasync-babel, phasync-hooked and
- * phasync/plug itself) is served unchanged: this loader must never translate the libraries that
- * do the translating or already run natively against phasync.
+ * **'cache' mode**: no stream wrapper. Translated files are written to the cache directory
+ * *mirroring the original absolute path* (`<cache>/<original absolute path>`), real files that
+ * opcache can and does cache normally, like any other file. {@see path()} resolves a path the way
+ * PHP's own include would, translates it if needed and returns the path to open instead; it is
+ * also what phasync-babel's `includeHandler` option rewrites every include/require to call, so
+ * that a translated file's own includes are translated too, recursively, without re-registering
+ * anything. phasync-babel's `fileConstants` option keeps __FILE__/__DIR__ reporting the *original*
+ * path even though the file PHP actually compiled is the cache mirror; Reflection's
+ * getFileName(), an exception's getFile()/getTrace() and PHP's own error messages, by contrast,
+ * necessarily show the mirror path (mirroring the original tree, so still recognisable), since
+ * those come from the file PHP actually opened, which this mode does not hide. The entry point
+ * (swerve.php) requires the application's own entry through {@see path()} explicitly; every file
+ * it requires (and everything *that* requires) stays in the cache once a translated file's own
+ * requires are rewritten into it by phasync-babel, so no second entry point is needed.
  *
- * Translated source is cached on disk, keyed by the file's real path, mtime and size, and a hash
- * of the map and phasync/babel's own version/reference, so a file is translated once -- not per
- * request, and not per worker, since the cache is shared on disk by every worker and every
- * process that uses the same cache directory.
- *
- * See the project README for the opcache finding this class's docblock cannot change: PHP's
- * opcache does not cache scripts opened through a non-default 'file' stream wrapper (confirmed
- * empirically -- no combination of url_stat/stream_stat/stream_set_option/
- * opcache.enable_file_override restores it), so every include/require of a translated file is
- * recompiled from source by PHP every time it runs. Under Swerve this cost is paid once per
- * worker boot (application files are required once, not per request); it would be a severe
- * regression under a per-request bootstrap such as PHP-FPM.
+ * In both modes: a path under one of the excluded prefixes (phasync, swerve, phasync-babel,
+ * phasync-hooked and phasync-plug's own src/) is served from its original path, untranslated --
+ * this loader must never translate the libraries that do the translating or already run
+ * natively against phasync. Translated source is cached on disk, keyed by the file's real path,
+ * mtime and size, and a hash of the map and phasync/babel's own version/reference, so a file is
+ * translated once -- not per request, and not per worker, since the cache is shared on disk by
+ * every worker and every process that uses the same cache directory.
  */
 final class Loader
 {
@@ -56,6 +67,9 @@ final class Loader
     private static bool $installed = false;
 
     private static string $babelVersion = 'unknown';
+
+    /** 'wrapper' or 'cache', see install(). */
+    private static string $mode = 'wrapper';
 
     /** @var resource|null set by PHP itself when a stream context is given to fopen() et al. */
     public $context;
@@ -84,18 +98,26 @@ final class Loader
     /**
      * The one entry point: builds the phasync/babel translator from $map, configures
      * phasync\Babel\Runtime with it (for class names and callables only known at run time), and
-     * registers this class as the 'file' stream wrapper.
+     * either registers this class as the 'file' stream wrapper ('wrapper' mode, the default) or
+     * prepares the on-disk cache mirror {@see path()} resolves into ('cache' mode).
      *
      * @param array{functions?: array<string,string>, classes?: array<string,string>} $map      phasync-babel's map (phasync/hooked's src/map.php, or a subset of it)
      * @param string                                                                  $cacheDir  directory for cached translations, created if missing; shared safely by several workers/processes (translate-then-atomic-rename)
      * @param list<string>                                                            $excludePrefixes path prefixes never translated (phasync, swerve, phasync-babel, phasync-hooked, phasync-plug); symlinks are resolved
+     * @param 'wrapper'|'cache'                                                       $mode      'wrapper': a file:// stream wrapper, original paths preserved by PHP believing it opened them; 'cache': no wrapper, a cache directory mirroring the original tree, opcache-cacheable, original paths preserved by phasync-babel's fileConstants/includeHandler options instead
      */
-    public static function install(array $map, string $cacheDir, array $excludePrefixes): void
+    public static function install(array $map, string $cacheDir, array $excludePrefixes, string $mode = 'wrapper'): void
     {
         if (self::$installed) {
             throw new \LogicException(self::class . '::install() runs once per process');
         }
-        self::$babel = new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? []);
+        if ('wrapper' !== $mode && 'cache' !== $mode) {
+            throw new \InvalidArgumentException(self::class . "::install(): mode must be 'wrapper' or 'cache', got '$mode'");
+        }
+        self::$mode = $mode;
+        self::$babel = 'cache' === $mode
+            ? new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], includeHandler: 'phasync\\plug\\path', fileConstants: true)
+            : new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? []);
         Runtime::configure(self::$babel);
 
         self::$cacheDir = \rtrim($cacheDir, '/');
@@ -114,8 +136,10 @@ final class Loader
 
         self::$babelVersion = self::resolveBabelVersion();
 
-        \stream_wrapper_unregister('file');
-        \stream_wrapper_register('file', self::class);
+        if ('wrapper' === $mode) {
+            \stream_wrapper_unregister('file');
+            \stream_wrapper_register('file', self::class);
+        }
         self::$installed = true;
     }
 
@@ -176,15 +200,22 @@ final class Loader
         return false;
     }
 
+    /** The cache key for $real's current content: its real path, mtime, size, the map and babel's version -- shared by both cache layouts. $stat: stat()'s result, or false when it failed. */
+    private static function cacheKey(string $real, array|false $stat): string
+    {
+        return \hash('sha256', $real . "\0" . ($stat['mtime'] ?? 0) . "\0" . ($stat['size'] ?? 0) . "\0" . self::$babel->fingerprint . "\0" . self::$babelVersion);
+    }
+
     /**
      * $src translated through phasync/babel, from the on-disk cache when a cached translation of
-     * the same real path, mtime, size, map and babel version already exists.
+     * the same real path, mtime, size, map and babel version already exists. 'wrapper' mode's
+     * cache: one flat file per key (the key is unique per content, so an existing file is always
+     * valid -- stale keys are simply orphaned, never cleaned up).
      */
     private static function translateCached(string $real, string $src): string
     {
         $stat = self::native(static fn () => @\stat($real));
-        $key  = \hash('sha256', $real . "\0" . ($stat['mtime'] ?? 0) . "\0" . ($stat['size'] ?? 0) . "\0" . self::$babel->fingerprint . "\0" . self::$babelVersion);
-        $cacheFile = self::$cacheDir . '/' . $key . '.php';
+        $cacheFile = self::$cacheDir . '/' . self::cacheKey($real, $stat) . '.php';
 
         $cached = self::native(static fn () => \is_file($cacheFile) ? \file_get_contents($cacheFile) : false);
         if (false !== $cached) {
@@ -199,6 +230,96 @@ final class Loader
         });
 
         return $out;
+    }
+
+    /**
+     * 'cache' mode: $real's translation, as a real file at the cache's mirror of $real
+     * (`<cacheDir><real>`), written only when missing or the key (see cacheKey()) changed, since
+     * a key does not name the file here -- the path must mirror $real exactly, so a sibling
+     * `.key` file records which translation is currently there. No stream wrapper is involved in
+     * this mode, so these are plain native calls.
+     */
+    private static function cacheMirrorFor(string $real): string
+    {
+        $mirror = self::$cacheDir . $real;
+        if (self::excluded($real)) {
+            return $real; // untranslated: no mirror, open the original directly
+        }
+        $stat = @\stat($real);
+        $key = self::cacheKey($real, $stat);
+        $keyFile = $mirror . '.key';
+        if (\is_file($mirror) && @\file_get_contents($keyFile) === $key) {
+            return $mirror;
+        }
+        $src = @\file_get_contents($real);
+        if (false === $src) {
+            throw new \RuntimeException(self::class . "::cacheMirrorFor(): cannot read $real");
+        }
+        $out = self::$babel->translate($src, $real);
+        $dir = \dirname($mirror);
+        if (!\is_dir($dir) && !@\mkdir($dir, 0777, true) && !\is_dir($dir)) {
+            throw new \RuntimeException(self::class . "::cacheMirrorFor(): cannot create cache directory $dir");
+        }
+        $unique = \getmypid() . '.' . \bin2hex(\random_bytes(4));
+        \file_put_contents($tmp = "$mirror.$unique.tmp", $out);
+        \rename($tmp, $mirror); // atomic on the same filesystem; a concurrent writer overwrites with identical bytes
+        \file_put_contents($tmp = "$keyFile.$unique.tmp", $key);
+        \rename($tmp, $keyFile); // written after $mirror: a reader never sees a key that doesn't match what's already there
+
+        return $mirror;
+    }
+
+    /**
+     * 'cache' mode: $path resolved exactly as PHP's own include/require would from $fromDir
+     * (absolute as given; './'/'../' relative to the working directory, include_path ignored;
+     * otherwise each include_path entry, then $fromDir, then the working directory), or false
+     * when nothing exists at any candidate.
+     */
+    private static function resolveIncludePath(string $path, string $fromDir): string|false
+    {
+        if ('' !== $path && ('/' === $path[0] || \str_starts_with($path, './') || \str_starts_with($path, '../'))) {
+            $candidate = '/' === $path[0] ? $path : \rtrim((string) \getcwd(), '/') . '/' . $path;
+
+            return \is_file($candidate) ? (\realpath($candidate) ?: $candidate) : false;
+        }
+        $includePath = (string) \ini_get('include_path');
+        $dirs = '' === $includePath ? [] : \explode(\PATH_SEPARATOR, $includePath);
+        foreach ([...$dirs, $fromDir, (string) \getcwd()] as $dir) {
+            if ('' === $dir) {
+                continue;
+            }
+            $candidate = \rtrim($dir, '/') . '/' . $path;
+            if (\is_file($candidate)) {
+                return \realpath($candidate) ?: $candidate;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 'cache' mode's one entry point for opening a path the way PHP's own include/require would:
+     * resolves $path from $fromDir, translates it if needed (unless excluded) and returns the
+     * real path to require/include instead -- the cache mirror, or the original path when
+     * excluded or already not needing translation. This is also what phasync-babel's
+     * includeHandler rewrites every include/require in a translated file to call, with its own
+     * directory as $fromDir, so a translated file's own includes are translated too, recursively.
+     *
+     * @see path() the plain function phasync-babel's includeHandler is configured with
+     *
+     * @throws \RuntimeException when nothing exists at $path (from $fromDir)
+     */
+    public static function resolve(string $path, string $fromDir): string
+    {
+        if ('cache' !== self::$mode) {
+            throw new \LogicException(self::class . "::resolve(): install() was not called with mode: 'cache'");
+        }
+        $real = self::resolveIncludePath($path, $fromDir);
+        if (false === $real) {
+            throw new \RuntimeException(self::class . "::resolve(): nothing at '$path' (from '$fromDir')");
+        }
+
+        return self::cacheMirrorFor($real);
     }
 
     public function stream_open(string $path, string $mode, int $options, ?string &$opened_path): bool

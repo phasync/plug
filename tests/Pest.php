@@ -6,12 +6,13 @@ declare(strict_types=1);
  * Runs tests/fixtures/harness.php as its own process (Loader::install() runs once per process,
  * so each scenario is a fresh PHP), and returns its stdout/stderr/exit code.
  *
- * @param list<string> $exclude path prefixes passed to Loader::install()
- * @param array<string, string> $env extra environment variables (e.g. PLUG_MARKER)
+ * @param list<string>           $exclude path prefixes passed to Loader::install()
+ * @param array<string, string>  $env     extra environment variables (e.g. PLUG_MARKER)
+ * @param 'wrapper'|'cache'      $mode    the Loader::install() mode the harness uses
  *
  * @return array{out: string, err: string, code: int}
  */
-function run_harness(string $cacheDir, array $exclude, string $target, array $env = []): array
+function run_harness(string $cacheDir, array $exclude, string $target, array $env = [], string $mode = 'wrapper'): array
 {
     $cmd = [
         \PHP_BINARY,
@@ -19,6 +20,7 @@ function run_harness(string $cacheDir, array $exclude, string $target, array $en
         $cacheDir,
         \implode(',', $exclude),
         $target,
+        $mode,
     ];
     $process = \proc_open(
         $cmd,

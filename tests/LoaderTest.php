@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 $targets = __DIR__ . '/fixtures/targets';
 
-test('a translated file keeps its original __FILE__/__DIR__, and a mapped call reaches the hooked replacement', function () use ($targets) {
+test('a translated file keeps its original __FILE__/__DIR__, and a mapped call reaches the hooked replacement', function (string $mode) use ($targets) {
     $cacheDir = plug_temp_dir();
     $marker   = plug_temp_dir() . '/marker';
 
-    $result = run_harness($cacheDir, [], "$targets/basic.php", ['PLUG_MARKER' => $marker]);
+    $result = run_harness($cacheDir, [], "$targets/basic.php", ['PLUG_MARKER' => $marker], $mode);
 
     expect($result['code'])->toBe(0, $result['err']);
     $data = json_decode($result['out'], true);
@@ -23,55 +23,79 @@ test('a translated file keeps its original __FILE__/__DIR__, and a mapped call r
     $marks = file_get_contents($marker);
     expect($marks)->toContain('HOOKED-strtoupper');
     expect($marks)->toContain('HOOKED-array_sum');
-});
+})->with(['wrapper', 'cache']);
 
-test('include_once/require_once dedup across translated files, and a plain include runs again', function () use ($targets) {
+test('include_once/require_once dedup across translated files, and a plain include runs again', function (string $mode) use ($targets) {
     $cacheDir = plug_temp_dir();
 
-    $result = run_harness($cacheDir, [], "$targets/include_once.php");
+    $result = run_harness($cacheDir, [], "$targets/include_once.php", mode: $mode);
 
     expect($result['code'])->toBe(0, $result['err']);
     $data = json_decode($result['out'], true);
     expect($data['file'])->toBe(realpath("$targets/include_once.php"));
     expect($data['runs'])->toBe(2); // the require_once/include_once pair deduped; the plain include ran once more
-});
+})->with(['wrapper', 'cache']);
 
-test('a path under an excluded prefix is served unchanged: no translation happens there', function () use ($targets) {
+test('a path under an excluded prefix is served unchanged: no translation happens there', function (string $mode) use ($targets) {
     $cacheDir = plug_temp_dir();
     $marker   = plug_temp_dir() . '/marker';
     $excludedDir = realpath(__DIR__ . '/fixtures/excluded');
 
-    $result = run_harness($cacheDir, [$excludedDir], "$excludedDir/excluded_marker.php", ['PLUG_MARKER' => $marker]);
+    $result = run_harness($cacheDir, [$excludedDir], "$excludedDir/excluded_marker.php", ['PLUG_MARKER' => $marker], $mode);
 
     expect($result['code'])->toBe(0, $result['err']);
     $data = json_decode($result['out'], true);
     expect($data['upper'])->toBe('XYZ'); // native strtoupper(), same visible result
     expect(file_exists($marker))->toBeFalse(); // but the hooked replacement never ran
-});
+})->with(['wrapper', 'cache']);
 
-test('a cache hit on a second, separate process skips re-translating: the cache file is written once', function () use ($targets) {
+test('a cache hit on a second, separate process skips re-translating: the cache file is written once', function (string $mode) use ($targets) {
     $cacheDir = plug_temp_dir();
+    // 'wrapper': one flat file named by its content hash. 'cache': one file mirroring the
+    // original absolute path (plus its sibling .key file).
+    $glob = 'wrapper' === $mode ? "$cacheDir/*.php" : "$cacheDir$targets/basic.php";
 
-    $first = run_harness($cacheDir, [], "$targets/basic.php");
+    $first = run_harness($cacheDir, [], "$targets/basic.php", mode: $mode);
     expect($first['code'])->toBe(0, $first['err']);
 
-    $files = glob("$cacheDir/*.php");
+    $files = glob($glob);
     expect($files)->toHaveCount(1);
     $mtimeAfterFirst = filemtime($files[0]);
 
-    // a brand new process, same cache directory and the same target: translateCached() must
-    // find the cache file and return its contents, never calling Babel::translate() again
+    // a brand new process, same cache directory and the same target: the cache must be reused,
+    // never calling Babel::translate() again
     usleep(1_100_000); // mtime has 1-second resolution: prove the file was NOT rewritten
-    $second = run_harness($cacheDir, [], "$targets/basic.php");
+    $second = run_harness($cacheDir, [], "$targets/basic.php", mode: $mode);
     expect($second['code'])->toBe(0, $second['err']);
     expect($second['out'])->toBe($first['out']);
 
-    $filesAfter = glob("$cacheDir/*.php");
+    $filesAfter = glob($glob);
     expect($filesAfter)->toHaveCount(1); // no second cache file was created
     expect(filemtime($filesAfter[0]))->toBe($mtimeAfterFirst); // and the existing one was not rewritten
+})->with(['wrapper', 'cache']);
+
+test('cache mode: the cache mirror file is cached by opcache', function () use ($targets) {
+    $cacheDir = plug_temp_dir();
+    $script = plug_temp_dir() . '/opcache-check.php';
+    file_put_contents($script, '<?php
+        require ' . var_export(dirname(__DIR__) . '/vendor/autoload.php', true) . ';
+        \phasync\plug\Loader::install([\'functions\' => []], ' . var_export($cacheDir, true) . ', [' . var_export(dirname(__DIR__) . '/vendor/phasync/babel', true) . '], mode: \'cache\');
+        $resolved = \phasync\plug\path(' . var_export("$targets/basic.php", true) . ', ' . var_export($targets, true) . ');
+        $before = opcache_get_status(true);
+        ob_start(); include $resolved; ob_end_clean(); // basic.php echoes JSON on every include; discard it
+        ob_start(); include $resolved; ob_end_clean();
+        ob_start(); include $resolved; ob_end_clean();
+        $after = opcache_get_status(true);
+        echo isset($after["scripts"][$resolved]) ? "cached" : "NOT-cached", " ";
+        echo ($after["opcache_statistics"]["hits"] - $before["opcache_statistics"]["hits"]);
+    ');
+
+    $result = run_harness_script($script, ['-d', 'opcache.enable_cli=1', '-d', 'opcache.enable=1', '-d', 'opcache.file_update_protection=0']);
+
+    expect($result['out'])->toBe('cached 2'); // 1 compile, 2 served from opcache's shared memory
 });
 
-test('non-include file operations behave natively through the wrapper', function () use ($targets) {
+test("non-include file operations behave natively (no wrapper is involved in 'cache' mode either)", function () use ($targets) {
     $cacheDir = plug_temp_dir();
 
     $result = run_harness($cacheDir, [], "$targets/fileops.php");
@@ -113,11 +137,13 @@ test('Loader::install() refuses to run twice in the same process', function () {
  * Runs an arbitrary PHP script as its own process (used where harness.php's fixed map doesn't
  * fit the scenario).
  *
+ * @param list<string> $phpArgs extra arguments for the PHP binary itself (e.g. -d ini=value), before the script
+ *
  * @return array{out: string, err: string, code: int}
  */
-function run_harness_script(string $script): array
+function run_harness_script(string $script, array $phpArgs = []): array
 {
-    $process = proc_open([PHP_BINARY, $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $process = proc_open([PHP_BINARY, ...$phpArgs, $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
     $out = stream_get_contents($pipes[1]);
     $err = stream_get_contents($pipes[2]);
     fclose($pipes[1]);
