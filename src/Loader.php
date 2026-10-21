@@ -120,24 +120,34 @@ final class Loader
             // by fileConstants the way __FILE__/__DIR__ are, reports the cache *mirror* path --
             // a tree of translated .php files only, missing every non-PHP resource (config/,
             // templates/, ...) a framework's own Reflection-based self-location (Symfony's
-            // Kernel::getProjectDir(), say) would otherwise find right next to it. These five
+            // Kernel::getProjectDir(), say) would otherwise find right next to it. These
             // Reflection subclasses and four function replacements (see Reflection/*.php and
             // functions.php) map every one of those back to the original path babel's own
             // fileConstants rewrite already uses -- built in here, not left to every caller to
             // remember, since it is intrinsic to what 'cache' mode must guarantee.
+            //
+            // ReflectionMethod is deliberately NOT in this map, unlike the others: confirmed
+            // against a real app (swerve-symfony's own compiler pass,
+            // AutowireRequiredMethodsPass) that ReflectionClass::getMethods() returns *native*
+            // ReflectionMethod instances regardless of this map (it is not itself overridden),
+            // so a parameter elsewhere babel also rewrote to this namespace's ReflectionMethod
+            // type then rejects them with a TypeError -- a native instance is not an instance of
+            // a subclass. The same risk exists in principle for any Reflection type reachable
+            // through another reflection call rather than a direct `new` (ReflectionClass's own
+            // getParentClass()/getInterfaces(), say) -- not found to matter for the other four in
+            // any suite run here, but accepted as a known limitation rather than chased further.
+            // ReflectionMethod::getFileName() keeps reporting the mirror path as a result.
             require_once __DIR__ . '/Reflection/UnmirrorsFileName.php';
             require_once __DIR__ . '/Reflection/ReflectionClass.php';
             require_once __DIR__ . '/Reflection/ReflectionObject.php';
             require_once __DIR__ . '/Reflection/ReflectionEnum.php';
             require_once __DIR__ . '/Reflection/ReflectionFunction.php';
-            require_once __DIR__ . '/Reflection/ReflectionMethod.php';
             require_once __DIR__ . '/functions.php';
             $map['classes'] = ($map['classes'] ?? []) + [
                 \ReflectionClass::class => Reflection\ReflectionClass::class,
                 \ReflectionObject::class => Reflection\ReflectionObject::class,
                 \ReflectionEnum::class => Reflection\ReflectionEnum::class,
                 \ReflectionFunction::class => Reflection\ReflectionFunction::class,
-                \ReflectionMethod::class => Reflection\ReflectionMethod::class,
             ];
             $map['functions'] = ($map['functions'] ?? []) + [
                 'get_included_files' => __NAMESPACE__ . '\\get_included_files',

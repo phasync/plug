@@ -116,16 +116,19 @@ test("cache mode: a sibling path built from Reflection's mirror-path getFileName
     expect($nested)->toBe([]);
 });
 
-test('cache mode: ReflectionClass, ReflectionObject, ReflectionEnum, ReflectionFunction and ReflectionMethod all report the original path, a Symfony-Kernel::getProjectDir()-style dirname() of one resolves the real project root, and get_included_files() lists originals too', function () use ($targets) {
+test('cache mode: ReflectionClass, ReflectionObject, ReflectionEnum and ReflectionFunction all report the original path, a Symfony-Kernel::getProjectDir()-style dirname() of one resolves the real project root, and get_included_files() lists originals too -- ReflectionMethod deliberately does not (see install())', function () use ($targets) {
     $cacheDir = plug_temp_dir();
 
     $result = run_harness($cacheDir, [], "$targets/reflection_types.php", mode: 'cache');
 
     expect($result['code'])->toBe(0, $result['err']);
     $data = json_decode($result['out'], true);
-    foreach (['class', 'object', 'enum', 'function', 'method'] as $kind) {
+    foreach (['class', 'object', 'enum', 'function'] as $kind) {
         expect($data[$kind])->toBe($data['original'], "Reflection$kind reported the mirror, not the original");
     }
+    // Not mapped: ReflectionClass::getMethods() returns native ReflectionMethod instances
+    // regardless, so mapping this one broke a real app (see install()'s own docblock).
+    expect($data['method'])->toStartWith($cacheDir);
     expect($data['projectDir'])->toBe(\dirname($data['original']));
     expect($data['includedFiles'])->toContain($data['original']);
     foreach ($data['includedFiles'] as $file) {
