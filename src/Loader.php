@@ -132,12 +132,20 @@ final class Loader
             // ReflectionMethod instances regardless of this map (it is not itself overridden),
             // so a parameter elsewhere babel also rewrote to this namespace's ReflectionMethod
             // type then rejects them with a TypeError -- a native instance is not an instance of
-            // a subclass. The same risk exists in principle for any Reflection type reachable
-            // through another reflection call rather than a direct `new` (ReflectionClass's own
-            // getParentClass()/getInterfaces(), say) -- not found to matter for the other four in
-            // any suite run here, but accepted as a known limitation rather than chased further.
-            // ReflectionMethod::getFileName() keeps reporting the mirror path as a result.
+            // a subclass. ReflectionMethod::getFileName() keeps reporting the mirror path as a
+            // result.
+            //
+            // ReflectionClass itself has the same exposure through getParentClass()/
+            // getInterfaces()/getTraits() -- also native-returning -- confirmed against the same
+            // app (Config\Resource\ReflectionClassResource::loadFiles() recurses through exactly
+            // these three). Unlike ReflectionMethod, these three are common enough (any class-
+            // hierarchy walk) that WrapsClassAccessors wraps their results back into this
+            // namespace's ReflectionClass instead of excluding the class outright. Other native
+            // APIs returning a bare \ReflectionClass (ReflectionProperty::getDeclaringClass(),
+            // ReflectionFunctionAbstract::getClosureScopeClass(), ...) are not wrapped and remain
+            // the same kind of residual risk, not found to matter in any suite run here.
             require_once __DIR__ . '/Reflection/UnmirrorsFileName.php';
+            require_once __DIR__ . '/Reflection/WrapsClassAccessors.php';
             require_once __DIR__ . '/Reflection/ReflectionClass.php';
             require_once __DIR__ . '/Reflection/ReflectionObject.php';
             require_once __DIR__ . '/Reflection/ReflectionEnum.php';
