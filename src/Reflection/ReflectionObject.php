@@ -12,4 +12,5 @@ namespace phasync\plug\Reflection;
 class ReflectionObject extends \ReflectionObject
 {
     use UnmirrorsFileName;
+    use WrapsClassAccessors;
 }

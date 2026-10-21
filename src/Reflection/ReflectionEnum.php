@@ -12,4 +12,5 @@ namespace phasync\plug\Reflection;
 class ReflectionEnum extends \ReflectionEnum
 {
     use UnmirrorsFileName;
+    use WrapsClassAccessors;
 }

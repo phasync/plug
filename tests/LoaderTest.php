@@ -136,6 +136,16 @@ test('cache mode: ReflectionClass, ReflectionObject, ReflectionEnum and Reflecti
     }
 });
 
+test("cache mode: walking a class hierarchy through getParentClass()/getInterfaces()/getTraits() (Symfony's ReflectionClassResource::loadFiles() does exactly this) never hands a recursive, babel-rewritten \\ReflectionClass-typed parameter a native instance it rejects", function () use ($targets) {
+    $cacheDir = plug_temp_dir();
+
+    $result = run_harness($cacheDir, [], "$targets/reflection_class_walk.php", mode: 'cache');
+
+    expect($result['code'])->toBe(0, $result['err']);
+    $data = json_decode($result['out'], true);
+    expect($data['files'])->toBe([$data['original']]); // every class/interface/trait lives in this one file, reported as the original
+});
+
 test("non-include file operations behave natively (no wrapper is involved in 'cache' mode either)", function () use ($targets) {
     $cacheDir = plug_temp_dir();
 
