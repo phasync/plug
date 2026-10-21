@@ -105,8 +105,11 @@ final class Loader
 
         self::$exclude = [];
         foreach ($excludePrefixes as $prefix) {
-            $real              = \realpath($prefix);
-            self::$exclude[] = \rtrim(false !== $real ? $real : $prefix, '/') . '/';
+            $real = \realpath($prefix);
+            if (false === $real) {
+                throw new \RuntimeException(self::class . "::install(): exclude prefix does not exist: $prefix");
+            }
+            self::$exclude[] = \rtrim($real, '/') . '/';
         }
 
         self::$babelVersion = self::resolveBabelVersion();

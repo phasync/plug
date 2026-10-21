@@ -2,5 +2,6 @@
 /composer.lock
 /e2e/app/vendor/
 /e2e/app/composer.lock
+/e2e/app/var/
 /.phpunit.cache/
 *.cache

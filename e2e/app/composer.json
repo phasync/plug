@@ -1,0 +1,26 @@
+{
+    "name": "phasync/plug-e2e-app",
+    "description": "Test application for the phasync-plug end-to-end proof: plain Swerve\\RequestHandler, no framework",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.2",
+        "phasync/swerve": "*",
+        "phasync/plug": "*",
+        "predis/predis": "^2.3"
+    },
+    "repositories": [
+        {"type": "path", "url": "/home/frode/dev/phasync-plug", "options": {"symlink": true}},
+        {"type": "path", "url": "/home/frode/dev/phasync-babel", "options": {"symlink": true}},
+        {"type": "path", "url": "/home/frode/dev/phasync-hooked", "options": {"symlink": true}},
+        {"type": "path", "url": "/home/frode/dev/phasync", "options": {"symlink": true}},
+        {"type": "path", "url": "/home/frode/dev/swerve", "options": {"symlink": true}}
+    ],
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    }
+}
