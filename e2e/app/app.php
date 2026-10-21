@@ -46,6 +46,21 @@ return new Swerve\RequestHandler(function (Swerve\ClientRequest $request) {
 
             return (string) $n;
         })(),
+        '/tpl' => (function () {
+            // A page rendered from 20 small "compiled view" partials, like Blade/WordPress
+            // templates: a fresh include() of each one, every request, the way a template engine
+            // that compiles views to plain PHP files does. Not I/O: the control for the loader's
+            // own per-include overhead (translate-from-cache, or a real recompile every time,
+            // see the opcache finding) once the worker has already booted and warmed its cache.
+            $data = ['title' => 'Report', 'now' => 'FIXED-TIME', 'total' => 20, 'items' => [1, 2, 3, 4, 5]];
+            $dir  = __DIR__ . '/templates';
+            \ob_start();
+            for ($i = 0; $i < 20; ++$i) {
+                include "$dir/tpl-$i.php";
+            }
+
+            return \ob_get_clean();
+        })(),
         default => null,
     };
 
