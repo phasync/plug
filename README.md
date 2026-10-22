@@ -41,13 +41,16 @@ work" below for why this list is not optional).
 
 ### Tests
 
-`vendor/bin/pest` (11 tests, all passing). Since `Loader::install()` runs once per process (in
+`vendor/bin/pest` (16 tests, all passing). Since `Loader::install()` runs once per process (in
 `'wrapper'` mode it registers a process-global stream wrapper), each scenario runs
 `tests/fixtures/harness.php` as its own subprocess, in either mode. Covered, in both modes:
 `__FILE__`/`__DIR__` preserved under translation and the hooked replacement actually called;
-`include_once`/`require_once` dedup across translated files; a path under an excluded prefix
-served byte-for-byte unchanged; the on-disk cache is reused by a second, independent process
-without rewriting it. `'cache'`-mode only: the mirror file is confirmed cached by opcache
+a mapped `PHP_SAPI` constant reads the real SAPI outside a `\Scope` override and the set name
+inside one (phasync-babel's constant-to-call mapping plus phasync-hooked's `php_sapi()`/
+`set_sapi_name()`, end to end -- the same `'constants'` map entry `e2e/app/swerve.php` uses for
+real); `include_once`/`require_once` dedup across translated files; a path under an excluded
+prefix served byte-for-byte unchanged; the on-disk cache is reused by a second, independent
+process without rewriting it. `'cache'`-mode only: the mirror file is confirmed cached by opcache
 (`opcache_get_status(true)`, 2 hits of 3 includes). Mode-agnostic: native file operations
 unaffected (no wrapper exists in `'cache'` mode either, so this is trivially true there, checked
 once more anyway); `install()` refuses a second call in the same process.

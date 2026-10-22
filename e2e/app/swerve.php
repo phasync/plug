@@ -51,7 +51,13 @@ if ('cache' === $plugMode) {
 
 if ($pluginOn) {
     \phasync\plug\Loader::install(
-        ['functions' => require "$devRoot/phasync-hooked/src/map.php"],
+        [
+            'functions' => require "$devRoot/phasync-hooked/src/map.php",
+            // phasync-hooked's map.php is a flat function => replacement table (php_sapi_name is
+            // in there already): PHP_SAPI itself is a constant, so it needs its own 'constants'
+            // entry, mapped to the replacement *function* phasync-babel calls in its place.
+            'constants' => ['PHP_SAPI' => 'phasync\\hooked\\php_sapi'],
+        ],
         \getenv('PLUG_CACHE_DIR') ?: __DIR__ . '/var/cache',
         [
             "$devRoot/phasync",

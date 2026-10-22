@@ -101,7 +101,7 @@ final class Loader
      * either registers this class as the 'file' stream wrapper ('wrapper' mode, the default) or
      * prepares the on-disk cache mirror {@see path()} resolves into ('cache' mode).
      *
-     * @param array{functions?: array<string,string>, classes?: array<string,string>} $map      phasync-babel's map (phasync/hooked's src/map.php, or a subset of it)
+     * @param array{functions?: array<string,string>, classes?: array<string,string>, constants?: array<string,string>} $map      phasync-babel's map (phasync/hooked's src/map.php under 'functions', or a subset of it, plus a 'constants' entry for PHP_SAPI -- phasync-hooked has no map.php entry for it, a constant rather than a function; see e2e/app/swerve.php)
      * @param string                                                                  $cacheDir  directory for cached translations, created if missing; shared safely by several workers/processes (translate-then-atomic-rename)
      * @param list<string>                                                            $excludePrefixes path prefixes never translated (phasync, swerve, phasync-babel, phasync-hooked, phasync-plug); symlinks are resolved
      * @param 'wrapper'|'cache'                                                       $mode      'wrapper': a file:// stream wrapper, original paths preserved by PHP believing it opened them; 'cache': no wrapper, a cache directory mirroring the original tree, opcache-cacheable, original paths preserved by phasync-babel's fileConstants/includeHandler options instead
@@ -165,8 +165,8 @@ final class Loader
             ];
         }
         self::$babel = 'cache' === $mode
-            ? new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], includeHandler: 'phasync\\plug\\path', fileConstants: true)
-            : new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? []);
+            ? new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], includeHandler: 'phasync\\plug\\path', fileConstants: true, constants: $map['constants'] ?? [])
+            : new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], constants: $map['constants'] ?? []);
         Runtime::configure(self::$babel);
 
         self::$cacheDir = \rtrim($cacheDir, '/');

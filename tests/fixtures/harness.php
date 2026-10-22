@@ -22,6 +22,12 @@ $map = [
         'strtoupper' => 'FixtureHooks\\captured_strtoupper',
         'array_sum'  => 'FixtureHooks\\captured_array_sum',
     ],
+    // Same mapping e2e/app/swerve.php uses for the real thing: PHP_SAPI is a constant, mapped to
+    // the replacement *function* phasync-babel calls in its place (phasync-hooked has no map.php
+    // entry for it -- that file only lists functions).
+    'constants' => [
+        'PHP_SAPI' => 'phasync\\hooked\\php_sapi',
+    ],
 ];
 // Real usage (see e2e/app/swerve.php) always excludes phasync-babel's own path: Babel::translate()
 // lazily autoloads its own classes (phasync\Babel\Unit, Shim, ...) through Composer, and that

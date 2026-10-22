@@ -25,6 +25,19 @@ test('a translated file keeps its original __FILE__/__DIR__, and a mapped call r
     expect($marks)->toContain('HOOKED-array_sum');
 })->with(['wrapper', 'cache']);
 
+test('PHP_SAPI, mapped to a replacement function, reads the real SAPI outside a scope and the set name inside one', function (string $mode) use ($targets) {
+    $cacheDir = plug_temp_dir();
+
+    $result = run_harness($cacheDir, [], "$targets/php_sapi.php", mode: $mode);
+
+    expect($result['code'])->toBe(0, $result['err']);
+    $data = json_decode($result['out'], true);
+    expect($data['before'])->toBe('cli'); // no override yet: the real PHP_SAPI (the harness runs under the CLI SAPI)
+    expect($data['inside'])->toBe('swerve-test'); // set_sapi_name()'s override, while its \Scope is current
+    expect($data['after'])->toBe('cli'); // back to the real one once \Scope::run() returns
+    expect($data['real'])->toBe('cli'); // constant('PHP_SAPI') is never rewritten, and agrees throughout
+})->with(['wrapper', 'cache']);
+
 test('include_once/require_once dedup across translated files, and a plain include runs again', function (string $mode) use ($targets) {
     $cacheDir = plug_temp_dir();
 
