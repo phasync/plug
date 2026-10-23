@@ -11,7 +11,7 @@
     "require-dev": {
         "pestphp/pest": "^3.0",
         "phasync/phasync": "^2.0.4",
-        "frodeborli/serializor": "*"
+        "phasync/serializor": "*"
     },
     "autoload": {
         "psr-4": {
