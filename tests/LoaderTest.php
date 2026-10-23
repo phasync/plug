@@ -178,6 +178,119 @@ test("non-include file operations behave natively (no wrapper is involved in 'ca
     expect($data['rmdir_gone'])->toBeTrue();
 });
 
+test('a path naming another registered stream wrapper (not file://) is read through it, translated and cached, with __FILE__/__DIR__ the URL and its dirname -- matching Serializor\'s own ClosureStream usage', function (string $mode) use ($targets) {
+    $cacheDir = plug_temp_dir();
+    $marker   = plug_temp_dir() . '/marker';
+
+    $result = run_harness($cacheDir, [], "$targets/wrapper_scheme.php", ['PLUG_MARKER' => $marker], $mode);
+
+    expect($result['code'])->toBe(0, $result['err']);
+    $data = json_decode($result['out'], true);
+    expect($data)->not->toBeNull($result['err']);
+
+    // __FILE__/__DIR__ read as a native include of the same URL already would (confirmed
+    // empirically: PHP sets __FILE__ to the literal URL and __DIR__ to dirname() of it for a
+    // stream-wrapper include) -- not the cache file actually opened.
+    expect($data['file'])->toBe($data['url']);
+    expect($data['dir'])->toBe(\dirname($data['url']));
+    expect($data['upper'])->toBe('AB'); // behaviour unchanged
+
+    // strtoupper() inside the wrapper-served code was translated to the hooked replacement too,
+    // proving the content read through the wrapper -- not just the requiring file -- was
+    // translated by babel, same as any other file.
+    expect(file_exists($marker))->toBeTrue();
+    expect(file_get_contents($marker))->toContain('HOOKED-strtoupper');
+})->with(['wrapper', 'cache']);
+
+test("a path naming another registered stream wrapper is cached once, under a flat, bounded filename (the URL itself can be the code, unboundedly long)", function () use ($targets) {
+    $cacheDir = plug_temp_dir();
+
+    $first = run_harness($cacheDir, [], "$targets/wrapper_scheme.php", mode: 'cache');
+    expect($first['code'])->toBe(0, $first['err']);
+
+    $files = glob("$cacheDir/scheme-*.php");
+    expect($files)->toHaveCount(1);
+    expect(basename($files[0]))->toMatch('/^scheme-[0-9a-f]{64}\.php$/');
+    $mtimeAfterFirst = filemtime($files[0]);
+
+    usleep(1_100_000); // mtime has 1-second resolution: prove the file was NOT rewritten
+    $second = run_harness($cacheDir, [], "$targets/wrapper_scheme.php", mode: 'cache');
+    expect($second['code'])->toBe(0, $second['err']);
+    expect($second['out'])->toBe($first['out']);
+
+    $filesAfter = glob("$cacheDir/scheme-*.php");
+    expect($filesAfter)->toHaveCount(1);
+    expect(filemtime($filesAfter[0]))->toBe($mtimeAfterFirst);
+});
+
+test('nothing readable at a registered stream wrapper URL throws, the same way resolve() reports a missing ordinary file', function () {
+    $script = plug_temp_dir() . '/missing-wrapper-url.php';
+    file_put_contents($script, '<?php
+        require ' . var_export(dirname(__DIR__) . '/vendor/autoload.php', true) . ';
+        class FailWrap { public $context; function stream_open($p, $m, $o, &$op) { return false; } }
+        stream_wrapper_register("failwrap", FailWrap::class);
+        \phasync\plug\Loader::install([\'functions\' => []], ' . var_export(plug_temp_dir(), true) . ', [], mode: \'cache\');
+        try {
+            @\phasync\plug\path("failwrap://x", __DIR__);
+            echo "no-exception";
+        } catch (\RuntimeException $e) {
+            echo "RuntimeException";
+        }
+    ');
+
+    $result = run_harness_script($script);
+    expect($result['out'])->toBe('RuntimeException');
+});
+
+test("end to end with frodeborli/serializor itself: a closure serialized in one process is unserialized and called in another, through the Loader -- the real trigger for this fix (Serializor\\ClosureStasis rebuilds a closure's code with require(ClosureStream::STREAM_PROTO . '://' . \$code))", function () {
+    if (!is_dir(dirname(__DIR__) . '/vendor/frodeborli/serializor')) {
+        $this->markTestSkipped('frodeborli/serializor is not installed (composer update needed)');
+    }
+
+    $cacheDir   = plug_temp_dir();
+    $marker     = plug_temp_dir() . '/marker';
+    $serialFile = plug_temp_dir() . '/closure.bin';
+
+    // Process A: serializes a static closure natively, no Loader involved.
+    $pack = proc_open(
+        [PHP_BINARY, __DIR__ . '/fixtures/serializor_pack.php', $serialFile],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $packPipes,
+    );
+    $packErr = stream_get_contents($packPipes[2]);
+    fclose($packPipes[1]);
+    fclose($packPipes[2]);
+    $packCode = proc_close($pack);
+    expect($packCode)->toBe(0, $packErr);
+    expect(is_file($serialFile))->toBeTrue();
+
+    // Process B: unserializes and calls it, with the Loader installed in 'cache' mode -- the
+    // mode the original bug report (Loader::resolve(): nothing at 'serializor://...') came from.
+    // Its own bootstrap (serializor_e2e_bootstrap.php), not tests/fixtures/harness.php's, since
+    // this scenario needs Composer's own autoloader loaded *through* the Loader (see that
+    // file's docblock) for Serializor's classes to be translated at all.
+    $unpack = proc_open(
+        [PHP_BINARY, __DIR__ . '/fixtures/serializor_e2e_bootstrap.php', $cacheDir, $serialFile, $marker],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $unpackPipes,
+    );
+    $out  = stream_get_contents($unpackPipes[1]);
+    $err  = stream_get_contents($unpackPipes[2]);
+    fclose($unpackPipes[1]);
+    fclose($unpackPipes[2]);
+    $code = proc_close($unpack);
+
+    expect($code)->toBe(0, $err);
+    $data = json_decode($out, true);
+    expect($data)->not->toBeNull($err);
+    expect($data['result'])->toBe('CLOSURE-RAN'); // the closure ran, behaviour unchanged
+
+    // strtoupper() inside the closure's own code -- rebuilt by Serializor through its
+    // serializor:// stream wrapper -- was translated to the hooked replacement too.
+    expect(file_exists($marker))->toBeTrue();
+    expect(file_get_contents($marker))->toContain('HOOKED-strtoupper');
+});
+
 test('Loader::install() refuses to run twice in the same process', function () {
     // A tiny standalone script (not through harness.php, which already installs once) that
     // installs twice itself.

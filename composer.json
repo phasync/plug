@@ -10,7 +10,8 @@
     },
     "require-dev": {
         "pestphp/pest": "^3.0",
-        "phasync/phasync": "^2.0.4"
+        "phasync/phasync": "^2.0.4",
+        "frodeborli/serializor": "*"
     },
     "autoload": {
         "psr-4": {
@@ -28,7 +29,8 @@
     "repositories": [
         {"type": "path", "url": "/home/frode/dev/phasync-babel", "options": {"symlink": true}},
         {"type": "path", "url": "/home/frode/dev/phasync-hooked", "options": {"symlink": true}},
-        {"type": "path", "url": "/home/frode/dev/phasync", "options": {"symlink": true}}
+        {"type": "path", "url": "/home/frode/dev/phasync", "options": {"symlink": true}},
+        {"type": "path", "url": "/home/frode/dev/serializor", "options": {"symlink": false}}
     ],
     "minimum-stability": "dev",
     "prefer-stable": true,

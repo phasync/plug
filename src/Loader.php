@@ -59,6 +59,18 @@ final class Loader
 
     private static ?Babel $babel = null;
 
+    /**
+     * Only built in 'wrapper' mode (null in 'cache' mode, where self::$babel already has
+     * includeHandler+fileConstants on): a second, otherwise identical Babel instance used only
+     * by {@see cacheWrapperUrl()}, so a URL served through some other registered stream
+     * wrapper (see resolve()) is translated "as any file" -- fileConstants on, so __FILE__/
+     * __DIR__ inside it become the original URL and dirname() of it, exactly as a native
+     * include of that URL already makes them -- without changing self::$babel's own,
+     * deliberately includeHandler-less, 'wrapper' mode configuration (see install()'s docblock
+     * on why 'wrapper' mode has no includeHandler of its own).
+     */
+    private static ?Babel $wrapperBabel = null;
+
     private static string $cacheDir;
 
     /** @var list<string> normalized (trailing slash), symlink-resolved real paths */
@@ -167,6 +179,9 @@ final class Loader
         self::$babel = 'cache' === $mode
             ? new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], includeHandler: 'phasync\\plug\\path', fileConstants: true, constants: $map['constants'] ?? [])
             : new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], constants: $map['constants'] ?? []);
+        self::$wrapperBabel = 'cache' === $mode
+            ? null
+            : new Babel(functions: $map['functions'] ?? [], classes: $map['classes'] ?? [], includeHandler: 'phasync\\plug\\path', fileConstants: true, constants: $map['constants'] ?? []);
         Runtime::configure(self::$babel);
 
         self::$cacheDir = \rtrim($cacheDir, '/');
@@ -386,6 +401,91 @@ final class Loader
     }
 
     /**
+     * $path's scheme, when it names one of PHP's own currently registered stream wrappers other
+     * than 'file' (phar:// included -- ext-phar registers it unconditionally; a wrapper it
+     * finds nothing readable through is still "a registered wrapper scheme" here, resolve()'s
+     * own read is what reports that failure). A 'file:' path (an ordinary absolute/relative
+     * path, or a drive letter on Windows) and a path naming no registered wrapper both return
+     * null -- the ordinary, filesystem-path case.
+     */
+    private static function wrapperScheme(string $path): ?string
+    {
+        if (!\preg_match('#^([A-Za-z][A-Za-z0-9+.-]*)://#', $path, $m)) {
+            return null;
+        }
+        if ('file' === \strtolower($m[1])) {
+            return null;
+        }
+        foreach (\stream_get_wrappers() as $registered) {
+            if (0 === \strcasecmp($registered, $m[1])) {
+                return $m[1];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * $url's translation (some other registered stream wrapper's URL -- the wrapper's own
+     * scheme carries no filesystem path to mirror, and for one like Serializor's `serializor://`
+     * the URL *is* the code, unbounded in length), cached once under a flat filename bounded by
+     * the hash alone, keyed by the URL and its content (there is no mtime/size to key by, unlike
+     * a real file). Read through the wrapper exactly as a native include would
+     * ({@see wrapperScheme()}'s caller already confirmed the scheme is registered); translated
+     * "as any file" through a Babel instance that always has fileConstants+includeHandler on
+     * (self::$wrapperBabel in 'wrapper' mode, where self::$babel itself does not; self::$babel
+     * itself in 'cache' mode, which already has them), so __FILE__/__DIR__ inside it become the
+     * literal URL and dirname() of it -- confirmed empirically to be exactly what PHP's own
+     * magic constants already read for a native include of a stream-wrapper URL, scheme and
+     * all, so this matches native behaviour, not just 'cache' mode's own convention.
+     *
+     * @throws \RuntimeException when nothing can be read at $url, the same way resolve() already
+     *                           reports a missing ordinary file -- an include/require of a
+     *                           translated unit's path expression is evaluated before the
+     *                           include/require itself runs, so there is no way to tell the two
+     *                           constructs apart from here, exactly as today's resolve() cannot
+     *                           either
+     */
+    private static function cacheWrapperUrl(string $url): string
+    {
+        $src = @\file_get_contents($url);
+        if (false === $src) {
+            throw new \RuntimeException(self::class . "::resolve(): nothing at '$url'");
+        }
+
+        $babel = self::$wrapperBabel ?? self::$babel;
+        $cacheFile = self::$cacheDir . '/scheme-' . \hash('sha256', $url . "\0" . $src . "\0" . $babel->fingerprint . "\0" . self::$babelVersion) . '.php';
+        if (\is_file($cacheFile)) {
+            return $cacheFile;
+        }
+
+        $out = $babel->translate($src, $url);
+        $unique = \getmypid() . '.' . \bin2hex(\random_bytes(4));
+        \file_put_contents($tmp = "$cacheFile.$unique.tmp", $out);
+        \rename($tmp, $cacheFile); // atomic on the same filesystem; a concurrent writer overwrites with identical bytes
+
+        return $cacheFile;
+    }
+
+    /**
+     * Whether $path is already one of cacheWrapperUrl()'s own flat cache files. Needed because
+     * resolve() is itself recursive (every require/include in translated code -- 'cache' mode's
+     * own, always; a translated unit that captured path()'s return value and requires it as a
+     * second, separate statement -- in either mode): once something requires the very path
+     * cacheWrapperUrl() just returned, that second resolve() call must recognise it and hand it
+     * straight back, unchanged -- it is already translated and lives directly under the cache
+     * directory, not mirroring any real absolute path. Without this, unmirror() -- correct for
+     * cacheMirrorFor()'s mirror tree, where every cache-dir-prefixed path genuinely mirrors one --
+     * would strip the cache directory off this flat file too and hand resolveIncludePath() a
+     * bogus path nothing exists at.
+     */
+    private static function isSchemeCacheFile(string $path): bool
+    {
+        return \dirname($path) === self::$cacheDir
+            && 1 === \preg_match('/^scheme-[0-9a-f]{64}\.php$/', \basename($path));
+    }
+
+    /**
      * 'cache' mode's one entry point for opening a path the way PHP's own include/require would:
      * resolves $path from $fromDir, translates it if needed (unless excluded) and returns the
      * real path to require/include instead -- the cache mirror, or the original path when
@@ -393,12 +493,29 @@ final class Loader
      * includeHandler rewrites every include/require in a translated file to call, with its own
      * directory as $fromDir, so a translated file's own includes are translated too, recursively.
      *
+     * A path naming some other registered stream wrapper ({@see wrapperScheme()}) is handled the
+     * same way regardless of Loader's own mode ({@see cacheWrapperUrl()}). In 'cache' mode this
+     * is reached automatically: babel's includeHandler already rewrites every include/require in
+     * translated code to call here, so a translated unit's own `require 'serializor://...'`
+     * (Serializor's closure unserializer does exactly this) lands here without it knowing
+     * anything about this package. 'wrapper' mode's own Babel instance has no includeHandler
+     * (see install()'s docblock on why), so a plain `require 'serializor://...'` there still
+     * reaches the registered wrapper directly, untranslated, same as without this package at
+     * all -- this function is reached in that mode only when something calls it explicitly, the
+     * same way e2e/app/swerve.php calls {@see path()} explicitly for its own entry file.
+     *
      * @see path() the plain function phasync-babel's includeHandler is configured with
      *
      * @throws \RuntimeException when nothing exists at $path (from $fromDir)
      */
     public static function resolve(string $path, string $fromDir): string
     {
+        if (self::isSchemeCacheFile($path)) {
+            return $path;
+        }
+        if (null !== self::wrapperScheme($path)) {
+            return self::cacheWrapperUrl($path);
+        }
         if ('cache' !== self::$mode) {
             throw new \LogicException(self::class . "::resolve(): install() was not called with mode: 'cache'");
         }
