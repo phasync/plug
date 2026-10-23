@@ -1,9 +1,15 @@
 # phasync/plug
 
-An end-to-end proof: how closely Swerve **without** ext-phasync, but with application code
-translated by [phasync-babel](https://github.com/) to call
-[phasync-hooked](https://github.com/)'s replacements, matches Swerve **with** ext-phasync loaded,
-on a real (if small) application. Not published; local proof only.
+Translates whole PHP applications, file trees rather than single files, with
+[phasync/babel](https://github.com/phasync/babel), so that their calls to blocking PHP functions
+(`fopen`, `fread`, `sleep`, `session_start`, ...) go to the cooperative replacements in
+[phasync/hooked](https://github.com/phasync/hooked). babel translates PHP code; plug applies it to
+an application as PHP loads it. Together they do in userspace what ext-phasync does natively
+(non-blocking I/O, per-request `sapi()` state), so Swerve can run applications cooperatively
+without the extension.
+
+The measurements below compare Swerve without ext-phasync (plug + babel + hooked) against Swerve
+with the extension on a real, if small, application.
 
 ## `phasync\plug\Loader`
 
